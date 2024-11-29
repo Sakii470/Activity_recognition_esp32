@@ -1,3 +1,7 @@
+
+
+
+
 /* Edge Impulse ingestion SDK
  * Copyright (c) 2022 EdgeImpulse Inc.
  *
@@ -15,7 +19,7 @@
  */
 
 /* Includes ---------------------------------------------------------------- */
-#include <Motion_recognition2_inferencing.h>
+#include <ActivityRecognitionn_inferencing.h>
 #include <DFRobot_LIS2DW12.h>
 #include <BLEDevice.h>
 #include <BLEServer.h>
@@ -23,6 +27,8 @@
 #include <BLE2902.h>
 #include <stdio.h>
 #include <string.h>
+#include "SPIFFS.h"
+#include "FS.h"
 
 
 #define SERVICE_UUID "020c6211-64f6-4e6d-82e8-c2c1391f75fa"
@@ -42,6 +48,10 @@ unsigned long startTime;
 BLECharacteristic *pCharacteristic;
 bool deviceConnected = false;
 int txValue = 0;
+File dataFile;
+File dataFileAcc;
+BLEServer *ppServer;
+
 
 
 class MyServerCallbacks : public BLEServerCallbacks {
@@ -49,8 +59,9 @@ class MyServerCallbacks : public BLEServerCallbacks {
     deviceConnected = true;
   };
 
-  void onDisconnected(BLEServer *pServver) {
+  void onDisconnect(BLEServer *pServer) {
     deviceConnected = false;
+    pServer->getAdvertising()->start();
   }
 };
 
@@ -83,7 +94,8 @@ void print_inference_result(ei_impulse_result_t result);
  * @brief      Arduino setup function
  */
 void setup() {
-  Serial.begin(9600);
+  Serial.begin(115200);
+  delay(100);
   while (!acce.begin()) {
     Serial.println("Communication failed, check the connection and I2C address setting when using I2C communication.");
     delay(1000);
@@ -106,6 +118,7 @@ void setup() {
 
   //Create the BLE Server
   BLEServer *pServer = BLEDevice::createServer();
+  ppServer = pServer;
   pServer->setCallbacks(new MyServerCallbacks());
 
   //Create the BLE Service
@@ -119,28 +132,69 @@ void setup() {
   //BLE2902 nedded to notify
   pCharacteristic->addDescriptor(new BLE2902());
 
+
   //Start the service
   pService->start();
 
   //Start advertising
   pServer->getAdvertising()->start();
   Serial.println("Waiting for a client connection notify...");
+
+  if(!SPIFFS.begin(true)){
+    Serial.println("Błąd inicjalizacji SPIFFS!");
+    return;
+  }
+
+
+    //Otwarcie pliku "dane.txt" w trybie zapisu, co spowoduje wyczyszczenie jego zawartości!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+  // dataFile = SPIFFS.open("/dane.txt", "w");
+  // if (!dataFile) {
+  //   Serial.println("Błąd otwarcia pliku 'dane.txt'!");
+  //   return;
+  // }
+  // dataFile.close();
+  // Serial.println("Zawartość pliku 'dane.txt' została wyczyszczona.");
+
+
+//Usunięcie pliku "dane.txt", jeśli istnieje!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+  // if (SPIFFS.exists("/dane.txt")) {
+  //   SPIFFS.remove("/dane.txt");
+  //   Serial.println("Plik 'dane.txt' został usunięty.");
+  // }
+
+  // if (SPIFFS.exists("/daneAcc.txt")) {
+  //   SPIFFS.remove("/daneAcc.txt");
+  //   Serial.println("Plik 'daneAcc.txt' został usunięty.");
+  // }
+
+  // // Otwarcie pliku w trybie dopisywania
+  // dataFile = SPIFFS.open("/dane.txt", "a");
+  // if(!dataFile){
+  //   Serial.println("Błąd otwarcia pliku!");
+  //   return;
+  // }
+
+  //   // Otwarcie pliku w trybie dopisywania
+  // dataFileAcc = SPIFFS.open("/daneAcc.txt", "a");
+  // if(!dataFileAcc){
+  //   Serial.println("Błąd otwarcia pliku!");
+  //   return;
+  // }
+  
 }
 /**
  * @brief      Arduino main function
  */
 void loop() {
-  //Serial.println("Edge Impulse standalone inferencing (Arduino)\n");
+  // Zbieranie danych z czujnika
   for (int i = 0; i < 90; i += 3) {
-    // Serial.println("From loop!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
-    //Serial.println(i);
     features[i] = acce.readAccX();
     features[i + 1] = acce.readAccY();
     features[i + 2] = acce.readAccZ();
     delay(100);
   }
 
-
+  // Sprawdzenie poprawności rozmiaru danych
   if (sizeof(features) / sizeof(float) != EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE) {
     ei_printf("The size of your 'features' array is not correct. Expected %lu items, but had %lu\n",
               EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE, sizeof(features) / sizeof(float));
@@ -150,61 +204,99 @@ void loop() {
 
   ei_impulse_result_t result = { 0 };
 
-
-  // the features are stored into flash, and we don't want to load everything into RAM
+  // Przygotowanie sygnału do klasyfikacji
   signal_t features_signal;
   features_signal.total_length = sizeof(features) / sizeof(features[0]);
   features_signal.get_data = &raw_feature_get_data;
 
-  // invoke the impulse
+  // Uruchomienie klasyfikatora
   EI_IMPULSE_ERROR res = run_classifier(&features_signal, &result, false /* debug */);
   if (res != EI_IMPULSE_OK) {
     ei_printf("ERR: Failed to run classifier (%d)\n", res);
     return;
   }
 
-  // print inference return code
-  // ei_printf("run_classifier returned: %d\r\n", res);
-  // print_inference_result(result);
-
-  // char txString[3]= ei_classifier_inferencing_categories[0];
-
-  char txString[8];
-  char valueString[3];
-  char resultString[20];
+  // Przygotowanie wyników klasyfikacji
+  char txString[20]; // Zwiększ rozmiar, aby zmieścić "Unknown Activity"
+  char valueString[10]; // Zwiększ rozmiar na wypadek dłuższych wartości
+  char resultString[30]; // Zwiększ rozmiar, aby uwzględnić dodatkowy tekst
   float runValue = result.classification[0].value;
   float standValue = result.classification[1].value;
   float walkValue = result.classification[2].value;
 
-  if (runValue > walkValue && runValue > standValue) {
+
+  if(runValue< 0.5 && walkValue < 0.5 && standValue<0.5){
+  strcpy(txString, "Unknown Activity");
+  }
+  else if (runValue > walkValue && runValue > standValue) {
     strcpy(txString, ei_classifier_inferencing_categories[0]);
     dtostrf(result.classification[0].value, 1, 4, valueString);
   }
-
   else if (walkValue > runValue && walkValue > standValue) {
     strcpy(txString, ei_classifier_inferencing_categories[2]);
     dtostrf(result.classification[2].value, 1, 4, valueString);
   }
-
   else {
     strcpy(txString, ei_classifier_inferencing_categories[1]);
     dtostrf(result.classification[1].value, 1, 4, valueString);
   }
 
-  strcpy(resultString, txString);
-  strcat(resultString, "=");
-  strcat(resultString, valueString);
+// Przygotowanie ciągu wynikowego w zależności od klasyfikacji
+if (strcmp(txString, "Unknown Activity") == 0) {
+    strcpy(resultString, txString); // Bez "="
+} else {
+    strcpy(resultString, txString);
+    strcat(resultString, "=");
+    strcat(resultString, valueString);
+}
 
 
-  //Setting the value to the characteriscic
+
+
+  // Ustawienie wartości w charakterystyce
   pCharacteristic->setValue(resultString);
 
-  //Notify the connected client
-  pCharacteristic->notify();
-  Serial.println("Sent value: " + String(resultString) + "\n");
-  //memset(resultString, 0, sizeof(resultString));
-  delay(1000);
+  // Wysyłanie powiadomienia tylko jeśli urządzenie jest połączone
+  if (deviceConnected) {
+    pCharacteristic->notify();
+    Serial.println("Send value " + String(resultString) + "\n");
+  }
+  else {
+    Serial.println("Lack GATT Connetion");
+  }
+
+  memset(resultString, 0, sizeof(resultString));
+  Serial.println("Connected: " + String(deviceConnected));
+  
+  // Opcjonalnie: zapis do pliku
+  /*
+  // dataFile.print(millis()-startTime);
+  // dataFile.print(", ");
+  // dataFile.println(String(resultString));
+
+  // dataFileAcc.print(millis()-startTime);
+  // dataFileAcc.print(", ");
+  // dataFileAcc.print(acce.readAccX());
+  // dataFileAcc.print(", ");
+  // dataFileAcc.print(acce.readAccY());
+  // dataFileAcc.print(", ");
+  // dataFileAcc.println(acce.readAccZ());
+  */
 }
+  
+  // else {
+  //   Serial.println("Measurement stopped after 10 seconds");
+  //  Serial.println("Dane zapisane!");
+  // listFiles("/");
+  // dataFile.close();
+  // dataFileAcc.close();
+  // // readDataFromFile("/dane.txt");
+  // // readDataFromFile("/daneAcc.txt");       
+
+
+  // delay(100000000);
+  // }
+
 
 void print_inference_result(ei_impulse_result_t result) {
 
@@ -244,4 +336,33 @@ void print_inference_result(ei_impulse_result_t result) {
 #if EI_CLASSIFIER_HAS_ANOMALY == 1
   ei_printf("Anomaly prediction: %.3f\r\n", result.anomaly);
 #endif
+}
+
+void readDataFromFile(const char* filename) {
+  // Otwarcie pliku w trybie odczytu
+  File dataFile = SPIFFS.open(filename, "r");
+  if(!dataFile){
+    Serial.println("Błąd otwarcia pliku!");
+    return;
+  }
+ // Odczyt danych z pliku i wyświetlenie ich w monitorze szeregowym
+  Serial.println("Zawartość pliku 'dane.txt':");
+  while(dataFile.available()) {
+    Serial.write(dataFile.read());
+  }
+  Serial.println(); // Dodatkowy enter na końcu
+  dataFile.close();
+}
+
+void listFiles(const char* dirname) {
+  Serial.println("Lista plików w katalogu głównym:");
+  
+  File root = SPIFFS.open("/");
+  File file = root.openNextFile();
+  
+  while (file) {
+    Serial.print("  ");
+    Serial.println(file.name());
+    file = root.openNextFile();
+  }
 }
